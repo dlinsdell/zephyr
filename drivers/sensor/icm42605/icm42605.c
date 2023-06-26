@@ -4,9 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#define DT_DRV_COMPAT invensense_icm42605
-
-#include <zephyr/drivers/spi.h>
 #include <zephyr/init.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/drivers/sensor.h>
@@ -15,7 +12,6 @@
 #include "icm42605.h"
 #include "icm42605_reg.h"
 #include "icm42605_setup.h"
-#include "icm42605_spi.h"
 
 LOG_MODULE_REGISTER(ICM42605, CONFIG_SENSOR_LOG_LEVEL);
 
@@ -125,13 +121,12 @@ int icm42605_tap_fetch(const struct device *dev)
 {
 	int result = 0;
 	struct icm42605_data *drv_data = dev->data;
-	const struct icm42605_config *cfg = dev->config;
 
 	if (drv_data->tap_en &&
 	    (drv_data->tap_handler || drv_data->double_tap_handler)) {
-		result = inv_spi_read(&cfg->spi, REG_INT_STATUS3, drv_data->fifo_data, 1);
+		result = drv_data->hw_tf->inv_read(dev, REG_INT_STATUS3, drv_data->fifo_data, 1);
 		if (drv_data->fifo_data[0] & BIT_INT_STATUS_TAP_DET) {
-			result = inv_spi_read(&cfg->spi, REG_APEX_DATA4,
+			result = drv_data->hw_tf->inv_read(dev, REG_APEX_DATA4,
 					      drv_data->fifo_data, 1);
 			if (drv_data->fifo_data[0] & APEX_TAP) {
 				if (drv_data->tap_trigger->type ==
@@ -170,15 +165,14 @@ static int icm42605_sample_fetch(const struct device *dev,
 	int result = 0;
 	uint16_t fifo_count = 0;
 	struct icm42605_data *drv_data = dev->data;
-	const struct icm42605_config *cfg = dev->config;
 
 	/* Read INT_STATUS (0x45) and FIFO_COUNTH(0x46), FIFO_COUNTL(0x47) */
-	result = inv_spi_read(&cfg->spi, REG_INT_STATUS, drv_data->fifo_data, 3);
+	result = drv_data->hw_tf->inv_read(dev, REG_INT_STATUS, drv_data->fifo_data, 3);
 
 	if (drv_data->fifo_data[0] & BIT_INT_STATUS_DRDY) {
 		fifo_count = (drv_data->fifo_data[1] << 8)
 			+ (drv_data->fifo_data[2]);
-		result = inv_spi_read(&cfg->spi, REG_FIFO_DATA, drv_data->fifo_data,
+		result = drv_data->hw_tf->inv_read(dev, REG_FIFO_DATA, drv_data->fifo_data,
 				      fifo_count);
 
 		/* FIFO Data structure
@@ -389,12 +383,14 @@ static int icm42605_data_init(struct icm42605_data *data,
 
 static int icm42605_init(const struct device *dev)
 {
-	struct icm42605_data *drv_data = dev->data;
+	int ret;
 	const struct icm42605_config *cfg = dev->config;
+	struct icm42605_data *drv_data = dev->data;
 
-	if (!spi_is_ready_dt(&cfg->spi)) {
-		LOG_ERR("SPI bus is not ready");
-		return -ENODEV;
+	ret = cfg->bus_init(dev);
+	if (ret < 0) {
+		LOG_ERR("Failed to initialize sensor bus");
+		return ret;
 	}
 
 	icm42605_data_init(drv_data, cfg);
@@ -425,30 +421,62 @@ static const struct sensor_driver_api icm42605_driver_api = {
 	.attr_get = icm42605_attr_get,
 };
 
-#define ICM42605_DEFINE_CONFIG(index)					\
-	static const struct icm42605_config icm42605_cfg_##index = {	\
+#if DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 0
+#warning "ICM42605 driver enabled without any devices"
+#endif
+
+#define ICM42605_DEVICE_INIT(index)						\
+	SENSOR_DEVICE_DT_INST_DEFINE(index,					\
+				icm42605_init,							\
+				NULL,									\
+				&icm42605_data_##index,					\
+				&icm42605_config_##index,				\
+				POST_KERNEL,							\
+				CONFIG_SENSOR_INIT_PRIORITY,			\
+				&icm42605_driver_api);
+
+#define ICM42605_CONFIG(index)									\
+		.gpio_int = GPIO_DT_SPEC_INST_GET(index, int_gpios),	\
+		.accel_hz = DT_INST_PROP(index, accel_hz),				\
+		.gyro_hz = DT_INST_PROP(index, gyro_hz),				\
+		.accel_fs = DT_INST_ENUM_IDX(index, accel_fs),			\
+		.gyro_fs = DT_INST_ENUM_IDX(index, gyro_fs),			\
+
+#define ICM42605_CONFIG_SPI(index)					\
+	{												\
+		.bus_init = icm42605_spi_init,				\
 		.spi = SPI_DT_SPEC_INST_GET(index,			\
-					    SPI_OP_MODE_MASTER |	\
-					    SPI_MODE_CPOL |		\
-					    SPI_MODE_CPHA |		\
-					    SPI_WORD_SET(8) |		\
-					    SPI_TRANSFER_MSB,		\
-					    0U),			\
-		.gpio_int = GPIO_DT_SPEC_INST_GET(index, int_gpios),    \
-		.accel_hz = DT_INST_PROP(index, accel_hz),		\
-		.gyro_hz = DT_INST_PROP(index, gyro_hz),		\
-		.accel_fs = DT_INST_ENUM_IDX(index, accel_fs),		\
-		.gyro_fs = DT_INST_ENUM_IDX(index, gyro_fs),		\
+						SPI_OP_MODE_MASTER |		\
+						SPI_MODE_CPOL |				\
+						SPI_MODE_CPHA |				\
+						SPI_WORD_SET(8) |			\
+						SPI_TRANSFER_MSB,			\
+						0U),						\
+		ICM42605_CONFIG(index)						\
+		}
+
+#define ICM42605_DEFINE_SPI(index)					\
+	static struct icm42605_data icm42605_data_##index;		\
+	static const struct icm42605_config icm42605_config_##index =	\
+		ICM42605_CONFIG_SPI(index);			\
+	ICM42605_DEVICE_INIT(index)
+
+#define ICM42605_CONFIG_I2C(index)					\
+	{												\
+		.bus_init = icm42605_i2c_init,				\
+		.i2c = I2C_DT_SPEC_INST_GET(index),			\
+		ICM42605_CONFIG(index)						\
 	}
 
-#define ICM42605_INIT(index)						\
-	ICM42605_DEFINE_CONFIG(index);					\
-	static struct icm42605_data icm42605_driver_##index;		\
-	SENSOR_DEVICE_DT_INST_DEFINE(index, icm42605_init,		\
-			    NULL,					\
-			    &icm42605_driver_##index,			\
-			    &icm42605_cfg_##index, POST_KERNEL,		\
-			    CONFIG_SENSOR_INIT_PRIORITY,		\
-			    &icm42605_driver_api);
+#define ICM42605_DEFINE_I2C(index)					\
+	static struct icm42605_data icm42605_data_##index;		\
+	static const struct icm42605_config icm42605_config_##index = 	\
+		ICM42605_CONFIG_I2C(index);			\
+	ICM42605_DEVICE_INIT(index)
 
-DT_INST_FOREACH_STATUS_OKAY(ICM42605_INIT)
+#define ICM42605_DEFINE(index)						\
+	COND_CODE_1(DT_INST_ON_BUS(index, spi),			\
+			(ICM42605_DEFINE_SPI(index)),			\
+			(ICM42605_DEFINE_I2C(index)))
+
+DT_INST_FOREACH_STATUS_OKAY(ICM42605_DEFINE)

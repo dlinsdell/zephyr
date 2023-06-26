@@ -7,19 +7,30 @@
 #ifndef ZEPHYR_DRIVERS_SENSOR_ICM42605_ICM42605_H_
 #define ZEPHYR_DRIVERS_SENSOR_ICM42605_ICM42605_H_
 
+#define DT_DRV_COMPAT invensense_icm42605
+
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
+#include <zephyr/drivers/sensor.h>
 
 #include "icm42605_reg.h"
+
+#if DT_ANY_INST_ON_BUS_STATUS_OKAY(spi)
+#include <zephyr/drivers/spi.h>
+#elif DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
+#include <zephyr/drivers/i2c.h>
+#endif
 
 typedef void (*tap_fetch_t)(const struct device *dev);
 int icm42605_tap_fetch(const struct device *dev);
 
 struct icm42605_data {
+	const struct icm42605_transfer_function* hw_tf;
+	bool bus_type; // 0 = SPI, 1 = I2C
+
 	uint8_t fifo_data[HARDWARE_FIFO_SIZE];
 
 	int16_t accel_x;
@@ -64,7 +75,12 @@ struct icm42605_data {
 };
 
 struct icm42605_config {
+#if DT_ANY_INST_ON_BUS_STATUS_OKAY(spi)
 	struct spi_dt_spec spi;
+#elif DT_ANY_INST_ON_BUS_STATUS_OKAY(i2c)
+	struct i2c_dt_spec i2c;
+#endif
+	int (*bus_init)(const struct device *dev);
 	struct gpio_dt_spec gpio_int;
 	uint16_t accel_hz;
 	uint16_t gyro_hz;
@@ -77,5 +93,13 @@ int icm42605_trigger_set(const struct device *dev,
 			 sensor_trigger_handler_t handler);
 
 int icm42605_init_interrupt(const struct device *dev);
+
+struct icm42605_transfer_function {
+	int (*inv_single_write)(const struct device *dev, uint8_t reg, uint8_t *data);
+	int (*inv_read)(const struct device *dev, uint8_t reg, uint8_t *data, size_t len);
+};
+
+int icm42605_spi_init(const struct device *dev);
+int icm42605_i2c_init(const struct device *dev);
 
 #endif /* __SENSOR_ICM42605__ */
